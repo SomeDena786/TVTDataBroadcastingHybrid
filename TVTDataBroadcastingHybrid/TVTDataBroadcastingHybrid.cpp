@@ -12,6 +12,13 @@
 #include "InputDialog.h"
 #include "OneSeg.h"
 #include <shellapi.h>
+#include <psapi.h>
+#include <map>
+#include <sstream>
+#include <algorithm>
+#include <winscard.h>
+#include <thread>
+#pragma comment(lib, "winscard.lib")
 
 using namespace Microsoft::WRL;
 
@@ -24,6 +31,8 @@ using namespace Microsoft::WRL;
 #define WM_APP_RESPONSE (WM_APP + 2)
 #define WM_APP_INPUT (WM_APP + 3)
 #define WM_APP_ENABLE_PLUGIN (WM_APP + 4)
+#define WM_APP_DB4K (WM_APP + 5)
+#define WM_APP_IRDID (WM_APP + 6)
 
 // サイドパネル向けメッセージ
 #define WM_APP_ON_PANEL_COLOR_CHANGE (WM_APP + 0)
@@ -56,6 +65,8 @@ struct Status
     std::wstring url;
     bool receiving = false;
     bool loading = false;
+    // HTML5アプリケーション (Hybridcast/BS4K) の文書を表示中かどうか
+    bool html5 = false;
 };
 
 struct PacketQueue
@@ -274,18 +285,18 @@ struct Audio
     }
 };
 
-// Plugins/TVTDataBroadcastingWV2.tvtp
+// Plugins/TVTDataBroadcastingHybrid.tvtp
 class CDataBroadcastingWV2 : public TVTest::CTVTestPlugin, TVTest::CTVTestEventHandler
 {
-    // Plugins/TVTDataBroadcastingWV2.ini
+    // Plugins/TVTDataBroadcastingHybrid.ini
     std::wstring iniFile;
-    // Plugins/TVTDataBroadcastingWV2/
+    // Plugins/TVTDataBroadcastingHybrid/
     std::wstring baseDirectory;
-    // Plugins/TVTDataBroadcastingWV2/resources/
+    // Plugins/TVTDataBroadcastingHybrid/resources/
     std::wstring resourceDirectory;
-    // Plugins/TVTDataBroadcastingWV2/WebView2Data/
+    // Plugins/TVTDataBroadcastingHybrid/WebView2Data/
     std::wstring webView2DataDirectory;
-    // Plugins/TVTDataBroadcastingWV2/WebView2/
+    // Plugins/TVTDataBroadcastingHybrid/WebView2/
     std::wstring webView2Directory;
 
     std::atomic<bool> webViewLoaded;
@@ -306,6 +317,25 @@ class CDataBroadcastingWV2 : public TVTest::CTVTestPlugin, TVTest::CTVTestEventH
     UINT panelInitialDpi;
     std::vector<std::pair<HWND, RECT>> panelItems;
     wil::com_ptr<IBasicVideo> basicVideo;
+    // MPC Video Rendererなどレンダラのフィルタ自身のIBasicVideoを遅延して探すため
+    wil::com_ptr<IGraphBuilder> graphBuilder;
+    bool basicVideoProbed = false;
+    // SetWindowPosで動画ウィンドウを動かしたかどうか (戻す必要がある)
+    bool videoWndMoved = false;
+    bool ProbeRendererBasicVideo();
+    void Html5DebugLog(const wchar_t* text)
+    {
+        if (!this->GetIniItem(L"Html5Debug", 0))
+        {
+            return;
+        }
+        FILE* f = nullptr;
+        if (!_wfopen_s(&f, (std::filesystem::path(this->baseDirectory) / L"debug.log").c_str(), L"a, ccs=UTF-8") && f)
+        {
+            fwprintf(f, L"%s\n", text);
+            fclose(f);
+        }
+    }
     wil::com_ptr<IBaseFilter> vmr7Renderer;
     wil::com_ptr<IBaseFilter> vmr9Renderer;
     bool invisible = false;
@@ -379,6 +409,79 @@ class CDataBroadcastingWV2 : public TVTest::CTVTestPlugin, TVTest::CTVTestEventH
 
     wil::com_ptr<ICoreWebView2Controller> webViewController;
     wil::com_ptr<ICoreWebView2> webView;
+    wil::com_ptr<ICoreWebView2Environment> webViewEnvironment;
+
+    // ARIB-HTML5 (Hybridcast/BS4K) アプリケーションエンジン
+    wil::com_ptr<ICoreWebView2Controller> html5Controller;
+    wil::com_ptr<ICoreWebView2> html5WebView;
+    HWND hHtml5WebViewWnd = nullptr;
+    bool html5Enabled = false;
+    bool html5Active = false;
+    bool html5Creating = false;
+    bool html5Unmanaged = false;
+    bool html5Layered = false;
+    nlohmann::json html5Launch;
+    std::wstring html5ScriptId;
+    std::string html5RuntimeScript;
+    int html5DocWidth = 1920;
+    int html5DocHeight = 1080;
+    RECT html5Bounds = {};
+    struct
+    {
+        bool red = true, green = true, yellow = true, blue = true, navigation = true, numeric = false, vcr = false, dbutton = true;
+    } html5KeySet;
+    // BML側の映像位置 (HTML5エンジン終了時に戻す)
+    RECT bmlVideoRect = {};
+    bool bmlInvisible = false;
+    std::map<std::string, std::string> html5Storage;
+    bool html5StorageLoaded = false;
+    void InitHtml5();
+    void SendHtml5Config();
+    // 挿入中のB-CASカードからカードIDを読み取る (STD-B24 getIRDID(5)用)
+    // カードIDは別スレッドで読み取る (スマートカードI/OはUIスレッドをブロックしうるため)
+    std::string cardId;
+    std::mutex cardIdMutex;
+    std::atomic<bool> cardIdStarted{ false };
+    std::thread cardIdThread;
+    std::string ReadBCASCardID();
+    void StartReadCardIdAsync();
+    void PostIRDID();
+    void SendIRDID();
+    // ステータスバーに表示するHTML5文書を設定する
+    void SetHtml5Status(LPCWSTR uri, bool loading);
+    void LaunchHtml5(const nlohmann::json& launch);
+    void CreateHtml5WebView();
+    void NavigateHtml5();
+    void StopHtml5(bool reloadBML);
+    void UpdateHtml5Bounds();
+    void OnHtml5WebMessage(const nlohmann::json& message);
+    HRESULT OnHtml5WebResourceRequested(ICoreWebView2WebResourceRequestedEventArgs* args);
+    void PostToHtml5(const nlohmann::json& message);
+    bool OnHtml5Command(int ID);
+    std::string BuildHtml5ConfigScript();
+    void TuneToService(int originalNetworkId, int transportStreamId, int serviceId);
+    nlohmann::json HandleHtml5NativeRPC(const std::string& method, const nlohmann::json& params, bool& handled);
+    void LoadHtml5Storage();
+    void SaveHtml5Storage();
+    bool html5Muted = false;
+    std::string db4kRunningKey;
+    std::string db4kWaitingEntry;
+    bool GetDB4KFile(LPCWSTR path, std::vector<BYTE>& data, std::wstring& contentType);
+    void CheckDB4K();
+    std::string ListDB4KFiles();
+    struct DB4KPendingRequest
+    {
+        wil::com_ptr<ICoreWebView2WebResourceRequestedEventArgs> args;
+        wil::com_ptr<ICoreWebView2Deferral> deferral;
+        std::wstring path;
+        ULONGLONG deadline;
+    };
+    std::vector<DB4KPendingRequest> db4kPending;
+    bool RespondDB4KFile(ICoreWebView2WebResourceRequestedEventArgs* args, const std::wstring& path);
+    void ProcessDB4KPending();
+    nlohmann::json html5LastVideo;
+    double html5Scale = 0;
+    void ApplyHtml5Video();
 
     static LRESULT CALLBACK EventCallback(UINT Event, LPARAM lParam1, LPARAM lParam2, void* pClientData);
     static INT_PTR CALLBACK RemoteControlDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam, void* pClientData);
@@ -416,12 +519,13 @@ bool CDataBroadcastingWV2::GetPluginInfo(TVTest::PluginInfo* pInfo)
 {
     pInfo->Type = TVTest::PLUGIN_TYPE_NORMAL;
     pInfo->Flags = TVTest::PLUGIN_FLAG_DISABLEONSTART | TVTest::PLUGIN_FLAG_HASSETTINGS;
-    pInfo->pszPluginName = L"TVTDataBroadcastingWV2";
-    pInfo->pszCopyright = L"2022-2023 otya";
-#ifdef TVTDATABROADCASTINGWV2_VERSION
-    pInfo->pszDescription = L"データ放送を表示" TVTDATABROADCASTINGWV2_VERSION;
+    pInfo->pszPluginName = L"TVTDataBroadcastingHybrid";
+    // 本プラグインは otya 氏の TVTDataBroadcastingWV2 を基にしたフォークです
+    pInfo->pszCopyright = L"2022-2023 otya / Hybridcast + BS4K fork";
+#ifdef TVTDATABROADCASTINGHYBRID_VERSION
+    pInfo->pszDescription = L"データ放送・ハイブリッドキャスト・BS4Kデータ放送を表示" TVTDATABROADCASTINGHYBRID_VERSION;
 #else
-    pInfo->pszDescription = L"データ放送を表示";
+    pInfo->pszDescription = L"データ放送・ハイブリッドキャスト・BS4Kデータ放送を表示";
 #endif
     return true;
 }
@@ -508,6 +612,11 @@ bool CDataBroadcastingWV2::OnServiceUpdate()
     {
         this->currentServiceIsOneSeg = false;
         this->packetQueue.clear();
+        if (this->html5Active)
+        {
+            // service_bound_flag: サービスの切り替えでアプリケーションは終了する
+            this->StopHtml5(false);
+        }
     }
     Tune();
     return true;
@@ -518,6 +627,12 @@ void CDataBroadcastingWV2::RestoreVideoWindow()
     RECT r;
     if (GetClientRect(hContainerWnd, &r))
     {
+        if (this->videoWndMoved && this->hVideoWnd && IsWindow(this->hVideoWnd))
+        {
+            // SetWindowPosで動かした動画ウィンドウはコンテナ全体に戻す (TVTestはWM_SIZEでは動画ウィンドウを動かさないことがある)
+            SetWindowPos(this->hVideoWnd, HWND_BOTTOM, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
+            this->videoWndMoved = false;
+        }
         PostMessageW(hContainerWnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(r.right - r.left, r.bottom - r.top));
     }
 }
@@ -549,7 +664,7 @@ std::wstring CDataBroadcastingWV2::GetIniItem(const wchar_t* key, const wchar_t*
     std::wstring item(size, 0);
     while (true)
     {
-        auto result = GetPrivateProfileStringW(L"TVTDataBroadcastingWV2", key, def, &item[0], size, this->iniFile.c_str());
+        auto result = GetPrivateProfileStringW(L"TVTDataBroadcastingHybrid", key, def, &item[0], size, this->iniFile.c_str());
         if (result + 1 != size)
         {
             item.resize(result);
@@ -561,12 +676,12 @@ std::wstring CDataBroadcastingWV2::GetIniItem(const wchar_t* key, const wchar_t*
 }
 INT CDataBroadcastingWV2::GetIniItem(const wchar_t* key, INT def)
 {
-    return GetPrivateProfileIntW(L"TVTDataBroadcastingWV2", key, def, this->iniFile.c_str());
+    return GetPrivateProfileIntW(L"TVTDataBroadcastingHybrid", key, def, this->iniFile.c_str());
 }
 
 bool CDataBroadcastingWV2::SetIniItem(const wchar_t* key, const wchar_t* data)
 {
-    return WritePrivateProfileStringW(L"TVTDataBroadcastingWV2", key, data, this->iniFile.c_str());
+    return WritePrivateProfileStringW(L"TVTDataBroadcastingHybrid", key, data, this->iniFile.c_str());
 }
 
 bool CDataBroadcastingWV2::Initialize()
@@ -617,7 +732,7 @@ bool CDataBroadcastingWV2::Initialize()
     TVTest::PanelItemInfo panel = {};
     panel.Size = sizeof(panel);
     panel.Style = TVTest::PANEL_ITEM_STYLE_NEEDFOCUS;
-    panel.pszIDText = L"TVTDataBroadcastingWV2Panel";
+    panel.pszIDText = L"TVTDataBroadcastingHybridPanel";
     panel.pszTitle = L"データ放送";
     panel.ID = 1;
     panel.hbmIcon = (HBITMAP)LoadImageW(g_hinstDLL, MAKEINTRESOURCEW(IDB_PLUGIN), IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
@@ -636,6 +751,7 @@ bool CDataBroadcastingWV2::Initialize()
     m_pApp->RegisterStatusItem(&statusItemInfo);
     this->useTVTestVolume = this->GetIniItem(L"UseTVTestVolume", true);
     this->useTVTestChannelCommand = this->GetIniItem(L"UseTVTestChannelCommand", true);
+    this->InitHtml5();
     if (this->GetIniItem(L"AutoEnable", 0))
     {
         // Initialize()でプラグインを有効にするかPLUGIN_FLAG_ENABLEDEFAULTだとサイドパネルのプラグインボタンが押された状態にならないので遅延する
@@ -699,6 +815,7 @@ LRESULT CALLBACK CDataBroadcastingWV2::MessageWndProc(HWND hWnd, UINT uMsg, WPAR
                     {
                         pThis->containerRect = rect;
                         pThis->webViewController->put_Bounds(rect);
+                        pThis->UpdateHtml5Bounds();
                     }
                 }
                 if (!pThis->invisible)
@@ -706,9 +823,21 @@ LRESULT CALLBACK CDataBroadcastingWV2::MessageWndProc(HWND hWnd, UINT uMsg, WPAR
                     pThis->ResizeVideoWindow();
                 }
             }
+            pThis->CheckDB4K();
             break;
         }
         }
+        break;
+    }
+    case WM_APP_DB4K:
+    {
+        pThis->CheckDB4K();
+        break;
+    }
+    case WM_APP_IRDID:
+    {
+        // 別スレッドでのカードID読み取り完了。WebViewへ反映する
+        pThis->PostIRDID();
         break;
     }
     case WM_APP_RESIZE:
@@ -732,6 +861,7 @@ LRESULT CALLBACK CDataBroadcastingWV2::MessageWndProc(HWND hWnd, UINT uMsg, WPAR
                     {
                         pThis->webViewController->put_Bounds(rect);
                     }
+                    pThis->UpdateHtml5Bounds();
                 }
             }
         }
@@ -839,7 +969,7 @@ LRESULT CALLBACK CDataBroadcastingWV2::MessageWndProc(HWND hWnd, UINT uMsg, WPAR
             response->deferral->Complete();
             break;
         }
-        responseHeaders->AppendHeader(L"Access-Control-Allow-Origin", L"https://tvtdatabroadcastingwv2.invalid");
+        responseHeaders->AppendHeader(L"Access-Control-Allow-Origin", L"https://tvtdatabroadcastinghybrid.invalid");
         response->args->put_Response(webResponse.get());
         response->deferral->Complete();
         break;
@@ -922,6 +1052,9 @@ HWND CDataBroadcastingWV2::GetFullscreenWindow()
 void CDataBroadcastingWV2::OnFilterGraphInitialized(TVTest::FilterGraphInfo* pInfo)
 {
     bool isRenderless = false;
+    this->graphBuilder = pInfo->pGraphBuilder;
+    this->basicVideoProbed = false;
+    this->videoWndMoved = false;
     // VMR9
     if (SUCCEEDED(pInfo->pGraphBuilder->FindFilterByName(L"VMR9", this->vmr9Renderer.put())))
     {
@@ -990,6 +1123,11 @@ void CDataBroadcastingWV2::OnFilterGraphInitialized(TVTest::FilterGraphInfo* pIn
     {
         this->hVideoWnd = FindWindowExW(this->hContainerWnd, nullptr, L"madVR", nullptr);
     }
+    if (this->hVideoWnd == nullptr)
+    {
+        // 0.10 MPC Video Renderer
+        this->hVideoWnd = FindWindowExW(this->hContainerWnd, nullptr, L"LibISDB MPCVR Video Window", nullptr);
+    }
     // 見つからなければNotification BarでもなくPseudo OSDでもないウィンドウを動画ウィンドウとする
     if (this->hVideoWnd == nullptr)
     {
@@ -1014,7 +1152,7 @@ void CDataBroadcastingWV2::OnFilterGraphInitialized(TVTest::FilterGraphInfo* pIn
                 {
                     continue;
                 }
-                if (hWnd == hWebViewWnd)
+                if (hWnd == hWebViewWnd || hWnd == this->hHtml5WebViewWnd || !wcsncmp(className, L"Chrome_WidgetWin_", wcslen(L"Chrome_WidgetWin_")))
                 {
                     continue;
                 }
@@ -1046,6 +1184,9 @@ void CDataBroadcastingWV2::OnFilterGraphInitialized(TVTest::FilterGraphInfo* pIn
 
 void CDataBroadcastingWV2::OnFilterGraphFinalize(TVTest::FilterGraphInfo* pInfo)
 {
+    this->graphBuilder = nullptr;
+    this->basicVideoProbed = false;
+    this->videoWndMoved = false;
     this->basicVideo = nullptr;
     this->vmr7Renderer = nullptr;
     this->vmr9Renderer = nullptr;
@@ -1067,7 +1208,7 @@ void CDataBroadcastingWV2::InitWebView2()
     auto resourceDirectory = this->GetIniItem(L"ResourceDirectory", this->resourceDirectory.c_str());
     if (!std::filesystem::is_directory(resourceDirectory))
     {
-        MessageBoxW(this->m_pApp->GetAppWindow(), (L"リソースディレクトリが見つかりません。\n" + resourceDirectory).c_str(), L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+        MessageBoxW(this->m_pApp->GetAppWindow(), (L"リソースディレクトリが見つかりません。\n" + resourceDirectory).c_str(), L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
         this->m_pApp->EnablePlugin(false);
         return;
     }
@@ -1086,10 +1227,11 @@ void CDataBroadcastingWV2::InitWebView2()
         {
             wchar_t buf[9]{};
             _itow_s(result, buf, 16);
-            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
             this->m_pApp->EnablePlugin(false);
             return S_OK;
         }
+        this->webViewEnvironment = env;
         wil::unique_cotaskmem_string ver;
         if (SUCCEEDED(env->get_BrowserVersionString(ver.put())))
         {
@@ -1101,7 +1243,7 @@ void CDataBroadcastingWV2::InitWebView2()
             {
                 wchar_t buf[9]{};
                 _itow_s(result, buf, 16);
-                MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+                MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
                 this->m_pApp->EnablePlugin(false);
                 return S_OK;
             }
@@ -1115,7 +1257,7 @@ void CDataBroadcastingWV2::InitWebView2()
             auto controller2 = this->webViewController.try_query<ICoreWebView2Controller2>();
             if (!controller2)
             {
-                MessageBoxW(this->m_pApp->GetAppWindow(), L"WebView2のバージョンが古すぎます。", L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+                MessageBoxW(this->m_pApp->GetAppWindow(), L"WebView2のバージョンが古すぎます。", L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
             }
             else
             {
@@ -1136,7 +1278,7 @@ void CDataBroadcastingWV2::InitWebView2()
 
             EventRegistrationToken token;
             auto webView3 = this->webView.query<ICoreWebView2_3>();
-            webView3->SetVirtualHostNameToFolderMapping(L"TVTDataBroadcastingWV2.invalid", resourceDirectory.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+            webView3->SetVirtualHostNameToFolderMapping(L"TVTDataBroadcastingHybrid.invalid", resourceDirectory.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
 
             // 仮想ホスト以外へのリクエストは全てブロックする
             // 通信が有効になっている場合は内部のプロキシへの通信のみ許可する
@@ -1155,8 +1297,8 @@ void CDataBroadcastingWV2::InitWebView2()
                 {
                     return hr;
                 }
-                auto get = L"https://TVTDataBroadcastingWV2-api.invalid/api/get/";
-                auto post = L"https://TVTDataBroadcastingWV2-api.invalid/api/post/";
+                auto get = L"https://TVTDataBroadcastingHybrid-api.invalid/api/get/";
+                auto post = L"https://TVTDataBroadcastingHybrid-api.invalid/api/post/";
                 LPCWSTR proxyUrl = nullptr;
                 if (!_wcsnicmp(get, uri.get(), wcslen(get)))
                 {
@@ -1170,7 +1312,7 @@ void CDataBroadcastingWV2::InitWebView2()
                 {
                     return this->Proxy(args, proxyUrl);
                 }
-                else if (_wcsnicmp(L"https://TVTDataBroadcastingWV2.invalid/", uri.get(), wcslen(L"https://TVTDataBroadcastingWV2.invalid/")))
+                else if (_wcsnicmp(L"https://TVTDataBroadcastingHybrid.invalid/", uri.get(), wcslen(L"https://TVTDataBroadcastingHybrid.invalid/")))
                 {
                     wil::com_ptr<ICoreWebView2Environment> env;
                     hr = this->webView.query<ICoreWebView2_2>()->get_Environment(env.put());
@@ -1211,72 +1353,57 @@ void CDataBroadcastingWV2::InitWebView2()
                         r.top = (int)std::floor(top);
                         r.bottom = (int)std::ceil(bottom);
 
-                        this->invisible = invisible;
-                        this->videoRect = r;
-                        this->ResizeVideoWindow();
+                        this->bmlInvisible = invisible;
+                        this->bmlVideoRect = r;
+                        if (!this->html5Active)
+                        {
+                            this->invisible = invisible;
+                            this->videoRect = r;
+                            this->ResizeVideoWindow();
+                        }
                     }
                     else if (type == "invisible")
                     {
                         auto invisible = a["invisible"].get<bool>();
-                        this->invisible = invisible;
-                        this->ResizeVideoWindow();
+                        this->bmlInvisible = invisible;
+                        if (!this->html5Active)
+                        {
+                            this->invisible = invisible;
+                            this->ResizeVideoWindow();
+                        }
                     }
                     else if (type == "status")
                     {
-                        auto url = utf8StrToWString(a["url"].get<std::string>().c_str());
-                        auto receiving = a["receiving"].get<bool>();
-                        auto loading = a["loading"].get<bool>();
-                        this->status.url = url;
-                        this->status.receiving = receiving;
-                        this->status.loading = loading;
-                        this->m_pApp->StatusItemNotify(1, TVTest::STATUS_ITEM_NOTIFY_REDRAW);
+                        // HTML5アプリケーション表示中はそちらの文書を優先して表示する
+                        if (!this->html5Active)
+                        {
+                            this->status.url = utf8StrToWString(a["url"].get<std::string>().c_str());
+                            this->status.receiving = a["receiving"].get<bool>();
+                            this->status.loading = a["loading"].get<bool>();
+                            this->status.html5 = false;
+                            this->m_pApp->StatusItemNotify(1, TVTest::STATUS_ITEM_NOTIFY_REDRAW);
+                        }
                     }
                     else if (type == "tune")
                     {
-                        auto originalNetworkId = a["originalNetworkId"].get<int>();
-                        auto transportStreamId = a["transportStreamId"].get<int>();
-                        auto serviceId = a["serviceId"].get<int>();
-                        TVTest::ChannelSelectInfo info = {};
-                        info.Size = sizeof(info);
-                        info.Flags = TVTest::CHANNEL_SELECT_FLAG_STRICTSERVICE | TVTest::CHANNEL_SELECT_FLAG_ALLOWDISABLED;
-                        // FIXME: original_network_idでない
-                        info.NetworkID = originalNetworkId;
-                        info.TransportStreamID = transportStreamId;
-                        info.ServiceID = serviceId;
-                        info.Channel = -1;
-                        info.Space = -1;
-                        if (!this->m_pApp->SelectChannel(&info))
+                        this->TuneToService(a["originalNetworkId"].get<int>(), a["transportStreamId"].get<int>(), a["serviceId"].get<int>());
+                    }
+                    else if (type == "launchHtml5")
+                    {
+                        this->LaunchHtml5(a);
+                    }
+                    else if (type == "killHtml5")
+                    {
+                        if (this->html5Active)
                         {
-                            int numSpace = 0;
-                            this->m_pApp->GetTuningSpace(&numSpace);
-                            bool success = false;
-                            for (int space = 0; space < numSpace && !success; space++)
-                            {
-                                for (int channel = 0; ; channel++)
-                                {
-                                    TVTest::ChannelInfo channelInfo = {};
-                                    if (!this->m_pApp->GetChannelInfo(space, channel, &channelInfo))
-                                    {
-                                        break;
-                                    }
-                                    // FIXME: original_network_idでない
-                                    if (channelInfo.NetworkID == originalNetworkId && channelInfo.TransportStreamID == transportStreamId)
-                                    {
-                                        success = this->m_pApp->SetChannel(space, channel, serviceId);
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!success)
-                            {
-                                auto msg = (L"データ放送からの選局に失敗しました。映像/音声のないサービスまたはチャンネルスキャンされていない可能性があります。(original_network_id=" + std::to_wstring(originalNetworkId) + L",transport_stream_id=" + std::to_wstring(transportStreamId) + L",service_id=" + std::to_wstring(serviceId) + L")");
-                                MessageBoxW(this->m_pApp->GetFullscreen() ? this->GetFullscreenWindow() : this->m_pApp->GetAppWindow(), msg.c_str(), nullptr, MB_ICONERROR | MB_OK);
-                                this->m_pApp->AddLog(msg.c_str(), TVTest::LOG_TYPE_ERROR);
-                                if (this->webView)
-                                {
-                                    this->webView->Reload();
-                                }
-                            }
+                            this->StopHtml5(false);
+                        }
+                    }
+                    else if (type == "html5Data")
+                    {
+                        if (this->html5Active && this->html5WebView)
+                        {
+                            this->html5WebView->PostWebMessageAsJson(message.get());
                         }
                     }
                     else if (type == "usedKeyList")
@@ -1424,6 +1551,8 @@ void CDataBroadcastingWV2::InitWebView2()
                     this->UpdateNetworkState();
                 }
                 this->UpdateAudioStream();
+                this->SendIRDID();
+                this->SendHtml5Config();
                 this->webViewLoaded = true;
                 if (this->oneSegWindowIsShown)
                 {
@@ -1443,11 +1572,11 @@ void CDataBroadcastingWV2::InitWebView2()
 
         if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
         {
-            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(CreateCoreWebView2EnvironmentWithOptions)\nWebView2がインストールされていない可能性があります。\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(CreateCoreWebView2EnvironmentWithOptions)\nWebView2がインストールされていない可能性があります。\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
         }
         else
         {
-            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(CreateCoreWebView2EnvironmentWithOptions)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingWV2", MB_ICONERROR | MB_OK);
+            MessageBoxW(this->m_pApp->GetAppWindow(), (std::wstring(L"WebView2を初期化できませんでした。(CreateCoreWebView2EnvironmentWithOptions)\nHRESULT = 0x") + buf).c_str(), L"TVTDataBroadcastingHybrid", MB_ICONERROR | MB_OK);
         }
         this->m_pApp->EnablePlugin(false);
     }
@@ -1575,9 +1704,26 @@ void CDataBroadcastingWV2::ResizeVideoWindow()
                 auto vmr7WindowlessControl = this->vmr7Renderer.query<IVMRWindowlessControl>();
                 vmr7WindowlessControl->SetVideoPosition(nullptr, &this->videoRect);
             }
-            else if (this->basicVideo)
+            else if (this->basicVideo || this->ProbeRendererBasicVideo())
             {
-                this->basicVideo->SetDestinationPosition(this->videoRect.left, this->videoRect.top, this->videoRect.right - this->videoRect.left, this->videoRect.bottom - this->videoRect.top);
+                // IBasicVideoの座標は動画ウィンドウ基準
+                // TVTestは動画ウィンドウ自体をアスペクト比に合わせてコンテナ内に配置していることがある (MPC Video Renderer等)
+                POINT offset{};
+                if ((!this->hVideoWnd || !IsWindow(this->hVideoWnd)) && this->hContainerWnd)
+                {
+                    // フィルタグラフ構築時には動画ウィンドウがまだ作られていないことがある
+                    this->hVideoWnd = FindWindowExW(this->hContainerWnd, nullptr, L"LibISDB MPCVR Video Window", nullptr);
+                    if (!this->hVideoWnd)
+                    {
+                        this->hVideoWnd = FindWindowExW(this->hContainerWnd, nullptr, L"LibISDB EVR Video Window", nullptr);
+                    }
+                }
+                if (this->hVideoWnd && IsWindow(this->hVideoWnd) && this->hContainerWnd)
+                {
+                    MapWindowPoints(this->hVideoWnd, this->hContainerWnd, &offset, 1);
+                }
+                this->basicVideo->SetDestinationPosition(this->videoRect.left - offset.x, this->videoRect.top - offset.y, this->videoRect.right - this->videoRect.left, this->videoRect.bottom - this->videoRect.top);
+
             }
             else
             {
@@ -1586,6 +1732,7 @@ void CDataBroadcastingWV2::ResizeVideoWindow()
                 {
                     if (memcmp(&rect, &this->videoRect, sizeof(rect)))
                     {
+                        this->videoWndMoved = true;
                         SetWindowPos(this->hVideoWnd, HWND_BOTTOM, this->videoRect.left, this->videoRect.top, this->videoRect.right - this->videoRect.left, this->videoRect.bottom - this->videoRect.top, SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
                     }
                 }
@@ -1596,6 +1743,19 @@ void CDataBroadcastingWV2::ResizeVideoWindow()
 
 void CDataBroadcastingWV2::Disable(bool finalize)
 {
+    // カードID読み取りスレッドを終了させる (hMessageWnd破棄より前)
+    if (this->cardIdThread.joinable())
+    {
+        this->cardIdThread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(this->cardIdMutex);
+        if (this->cardId.empty())
+        {
+            // 読み取れなかった場合は次回の有効化で再試行する
+            this->cardIdStarted = false;
+        }
+    }
     this->RestoreMainAudio();
     this->RestoreVideoWindow();
     m_pApp->SetStreamCallback(TVTest::STREAM_CALLBACK_REMOVE, StreamCallback, this);
@@ -1610,6 +1770,17 @@ void CDataBroadcastingWV2::Disable(bool finalize)
         this->hRemoteWnd = nullptr;
         DestroyWindow(hWnd);
     }
+    if (this->html5Controller)
+    {
+        this->html5WebView->Stop();
+        this->html5WebView.reset();
+        this->html5Controller->Close();
+        this->html5Controller.reset();
+    }
+    this->hHtml5WebViewWnd = nullptr;
+    this->html5Active = false;
+    this->html5Creating = false;
+    this->html5Layered = false;
     if (this->webViewController)
     {
         this->webView->Stop();
@@ -1617,6 +1788,7 @@ void CDataBroadcastingWV2::Disable(bool finalize)
         this->webViewController->Close();
         this->webViewController.reset();
     }
+    this->webViewEnvironment.reset();
     this->webViewLoaded = false;
 
     this->packetQueue.clear();
@@ -1668,9 +1840,9 @@ void CDataBroadcastingWV2::CreateMessageWindow()
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = MessageWndProc;
     wc.hInstance = g_hinstDLL;
-    wc.lpszClassName = L"TVTDataBroadcastingWV2 Message Window";
+    wc.lpszClassName = L"TVTDataBroadcastingHybrid Message Window";
     RegisterClassExW(&wc);
-    this->hMessageWnd = CreateWindowExW(0, L"TVTDataBroadcastingWV2 Message Window", L"TVTDataBroadcastingWV2 Message Window", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+    this->hMessageWnd = CreateWindowExW(0, L"TVTDataBroadcastingHybrid Message Window", L"TVTDataBroadcastingHybrid Message Window", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
     SetWindowLongPtrW(this->hMessageWnd, GWLP_USERDATA, (LONG_PTR)this);
 }
 
@@ -1691,6 +1863,8 @@ bool CDataBroadcastingWV2::OnPluginEnable(bool fEnable)
             this->OnVolumeChange(this->m_pApp->GetVolume(), this->m_pApp->GetMute());
         }
         InitWebView2();
+        // カードIDの読み取りを先に(別スレッドで)開始しておく
+        this->StartReadCardIdAsync();
         SetTimer(this->hMessageWnd, IDT_RESIZE, 1000, nullptr);
         this->EnablePanelButtons(true);
         if (this->GetIniItem(L"EnableNetwork", 0))
@@ -1706,6 +1880,107 @@ bool CDataBroadcastingWV2::OnPluginEnable(bool fEnable)
     return true;
 }
 
+// 挿入中のB-CASカードからカードIDを読み取る
+// STD-B25 初期設定条件コマンド (90 30 00 00 00) の応答:
+//   オフセット6-7: CA_system_id (B-CASは0x0005)
+//   オフセット8-13: カードID (6バイト, ビッグエンディアン)
+// getIRDID(5)が返すべき値 = カードIDを16進12桁で表記したもの
+std::string CDataBroadcastingWV2::ReadBCASCardID()
+{
+    SCARDCONTEXT context = 0;
+    if (SCardEstablishContext(SCARD_SCOPE_USER, nullptr, nullptr, &context) != SCARD_S_SUCCESS)
+    {
+        return {};
+    }
+    std::string result;
+    DWORD readersLen = SCARD_AUTOALLOCATE;
+    LPWSTR readers = nullptr;
+    if (SCardListReadersW(context, nullptr, reinterpret_cast<LPWSTR>(&readers), &readersLen) == SCARD_S_SUCCESS && readers)
+    {
+        for (LPWSTR reader = readers; *reader; reader += wcslen(reader) + 1)
+        {
+            SCARDHANDLE card = 0;
+            DWORD protocol = 0;
+            if (SCardConnectW(context, reader, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T1 | SCARD_PROTOCOL_T0, &card, &protocol) != SCARD_S_SUCCESS)
+            {
+                continue;
+            }
+            BYTE command[] = { 0x90, 0x30, 0x00, 0x00, 0x00 };
+            BYTE recv[258] = {};
+            DWORD recvLen = sizeof(recv);
+            auto pci = (protocol == SCARD_PROTOCOL_T0) ? SCARD_PCI_T0 : SCARD_PCI_T1;
+            if (SCardTransmit(card, pci, command, sizeof(command), nullptr, recv, &recvLen) == SCARD_S_SUCCESS
+                && recvLen >= 14 && recv[6] == 0x00 && recv[7] == 0x05)
+            {
+                char buf[16];
+                sprintf_s(buf, "%02x%02x%02x%02x%02x%02x", recv[8], recv[9], recv[10], recv[11], recv[12], recv[13]);
+                result = buf;
+                SCardDisconnect(card, SCARD_LEAVE_CARD);
+                break;
+            }
+            SCardDisconnect(card, SCARD_LEAVE_CARD);
+        }
+        SCardFreeMemory(context, readers);
+    }
+    SCardReleaseContext(context);
+    return result;
+}
+
+// カードIDの読み取りを開始する (一度だけ)
+// スマートカードI/Oはカードが使用中だとブロックしうるため、UIスレッドでは行わず別スレッドで読む
+void CDataBroadcastingWV2::StartReadCardIdAsync()
+{
+    if (this->cardIdStarted.exchange(true))
+    {
+        return;
+    }
+    // iniでカードIDを上書きできる (カードリーダーが無い環境向け)
+    auto iniCardId = wstrToUTF8String(this->GetIniItem(L"CardID", L"").c_str());
+    if (!iniCardId.empty())
+    {
+        std::lock_guard<std::mutex> lock(this->cardIdMutex);
+        this->cardId = iniCardId;
+        return;
+    }
+    this->cardIdThread = std::thread([this]() {
+        auto id = this->ReadBCASCardID();
+        {
+            std::lock_guard<std::mutex> lock(this->cardIdMutex);
+            this->cardId = id;
+        }
+        // 読み取り完了をUIスレッドに通知してWebViewへ反映する
+        if (this->hMessageWnd)
+        {
+            PostMessageW(this->hMessageWnd, WM_APP_IRDID, 0, 0);
+        }
+    });
+}
+
+// 現在キャッシュされているカードIDをBML(WebView#1)へ送る (非ブロッキング)
+void CDataBroadcastingWV2::PostIRDID()
+{
+    if (!this->webView)
+    {
+        return;
+    }
+    std::string id;
+    {
+        std::lock_guard<std::mutex> lock(this->cardIdMutex);
+        id = this->cardId;
+    }
+    nlohmann::json msg{
+        { "type", "irdid" },
+        { "value", id.empty() ? nlohmann::json(nullptr) : nlohmann::json(id) },
+    };
+    this->webView->PostWebMessageAsJson(utf8StrToWString(msg.dump().c_str()).c_str());
+}
+
+void CDataBroadcastingWV2::SendIRDID()
+{
+    this->StartReadCardIdAsync();
+    this->PostIRDID();
+}
+
 void CDataBroadcastingWV2::Tune()
 {
     if (this->webView && this->currentService.ServiceID)
@@ -1714,12 +1989,16 @@ void CDataBroadcastingWV2::Tune()
         wil::unique_cotaskmem_string source;
         if (SUCCEEDED(this->webView->get_Source(source.put())))
         {
-            std::wstring baseUrl(L"https://TVTDataBroadcastingWV2.invalid/TVTDataBroadcastingWV2.html?serviceId=");
+            std::wstring baseUrl(L"https://TVTDataBroadcastingHybrid.invalid/TVTDataBroadcastingHybrid.html?serviceId=");
             baseUrl += std::to_wstring(this->currentService.ServiceID);
             baseUrl += L"&networkId=";
             baseUrl += std::to_wstring(this->currentChannel.NetworkID);
             if (_wcsicmp(source.get(), baseUrl.c_str()))
             {
+                if (this->html5Active)
+                {
+                    this->StopHtml5(false);
+                }
                 this->oneSegWindow = nullptr;
                 this->RestoreVideoWindow();
                 this->webView->Navigate(baseUrl.c_str());
@@ -1998,6 +2277,10 @@ bool CDataBroadcastingWV2::OnCommand(int ID)
             }
         }
         return false;
+    }
+    if (this->html5Active && this->OnHtml5Command(ID))
+    {
+        return true;
     }
     switch (ID)
     {
@@ -2323,21 +2606,21 @@ INT_PTR CALLBACK CDataBroadcastingWV2::SettingsDlgProc(HWND hDlg, UINT uMsg, WPA
                 auto disableRemoteControl = SendDlgItemMessageW(hDlg, IDC_CHECK_DISABLE_REMOTECON, BM_GETCHECK, 0, 0);
                 if (!pThis->SetIniItem(L"DisableRemoteControl", disableRemoteControl ? L"1" : L"0"))
                 {
-                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingWV2の設定", MB_ICONERROR | MB_OK);
+                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingHybridの設定", MB_ICONERROR | MB_OK);
                     EndDialog(hDlg, IDCANCEL);
                     return 1;
                 }
                 auto autoEnable = SendDlgItemMessageW(hDlg, IDC_CHECK_AUTOENABLE, BM_GETCHECK, 0, 0);
                 if (!pThis->SetIniItem(L"AutoEnable", autoEnable ? L"1" : L"0"))
                 {
-                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingWV2の設定", MB_ICONERROR | MB_OK);
+                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingHybridの設定", MB_ICONERROR | MB_OK);
                     EndDialog(hDlg, IDCANCEL);
                     return 1;
                 }
                 pThis->useTVTestVolume = SendDlgItemMessageW(hDlg, IDC_CHECK_USE_TVTEST_VOLUME, BM_GETCHECK, 0, 0);
                 if (!pThis->SetIniItem(L"UseTVTestVolume", pThis->useTVTestVolume ? L"1" : L"0"))
                 {
-                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingWV2の設定", MB_ICONERROR | MB_OK);
+                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingHybridの設定", MB_ICONERROR | MB_OK);
                     EndDialog(hDlg, IDCANCEL);
                     return 1;
                 }
@@ -2345,7 +2628,7 @@ INT_PTR CALLBACK CDataBroadcastingWV2::SettingsDlgProc(HWND hDlg, UINT uMsg, WPA
                 pThis->useTVTestChannelCommand = SendDlgItemMessageW(hDlg, IDC_CHECK_USE_TVTEST_CHANNEL_COMMAND, BM_GETCHECK, 0, 0);
                 if (!pThis->SetIniItem(L"UseTVTestChannelCommand", pThis->useTVTestChannelCommand ? L"1" : L"0"))
                 {
-                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingWV2の設定", MB_ICONERROR | MB_OK);
+                    MessageBoxW(hDlg, L"設定を保存できませんでした", L"TVTDataBroadcastingHybridの設定", MB_ICONERROR | MB_OK);
                     EndDialog(hDlg, IDCANCEL);
                     return 1;
                 }
@@ -2357,7 +2640,7 @@ INT_PTR CALLBACK CDataBroadcastingWV2::SettingsDlgProc(HWND hDlg, UINT uMsg, WPA
         {
             if (!pThis->webView)
             {
-                MessageBoxW(hDlg, L"プラグインが有効の間のみ郵便番号・保存領域の設定を行えます。", L"TVTDataBroadcastingWV2の設定", MB_ICONERROR | MB_OK);
+                MessageBoxW(hDlg, L"プラグインが有効の間のみ郵便番号・保存領域の設定を行えます。", L"TVTDataBroadcastingHybridの設定", MB_ICONERROR | MB_OK);
             }
             else
             {
@@ -2647,7 +2930,58 @@ void CDataBroadcastingWV2::UpdateDigitButton()
     }
 }
 
+#include "Html5Engine.inl"
+
 TVTest::CTVTestPlugin* CreatePluginClass()
 {
     return new CDataBroadcastingWV2;
+}
+
+// レンダラのフィルタ自身が実装しているIBasicVideoを探す (MPC Video Renderer等)
+// グラフ経由のIBasicVideoは接続前に判定されてEVR扱いになっていることがある
+bool CDataBroadcastingWV2::ProbeRendererBasicVideo()
+{
+    if (this->basicVideoProbed || !this->graphBuilder || !this->hVideoWnd)
+    {
+        return this->basicVideo != nullptr;
+    }
+    WCHAR className[100] = {};
+    GetClassNameW(this->hVideoWnd, className, _countof(className));
+    this->Html5DebugLog((std::wstring(L"ProbeRendererBasicVideo: hVideoWnd class=") + className).c_str());
+    // EVRはウィンドウを動かす方式で問題ないのでMPCVRのみ
+    if (!wcsstr(className, L"MPCVR"))
+    {
+        this->basicVideoProbed = true;
+        return false;
+    }
+    this->basicVideoProbed = true;
+    wil::com_ptr<IEnumFilters> filters;
+    if (FAILED(this->graphBuilder->EnumFilters(filters.put())))
+    {
+        return false;
+    }
+    wil::com_ptr<IBaseFilter> filter;
+    while (filters->Next(1, filter.put(), nullptr) == S_OK)
+    {
+        auto bv = filter.try_query<IBasicVideo>();
+        long l, t, w, h;
+        if (bv && SUCCEEDED(bv->GetDestinationPosition(&l, &t, &w, &h)))
+        {
+            this->basicVideo = bv;
+            this->m_pApp->AddLog(L"動画レンダラのIBasicVideoで映像位置を制御します", TVTest::LOG_TYPE_INFORMATION);
+            // 以前にウィンドウを動かしていれば戻す
+            if (this->videoWndMoved)
+            {
+                RECT r;
+                if (GetClientRect(this->hContainerWnd, &r))
+                {
+                    SetWindowPos(this->hVideoWnd, HWND_BOTTOM, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE);
+                }
+                this->videoWndMoved = false;
+            }
+            return true;
+        }
+        filter.reset();
+    }
+    return false;
 }

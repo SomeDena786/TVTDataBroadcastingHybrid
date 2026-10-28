@@ -1,112 +1,125 @@
-# TVTDataBroadcastingWV2
+# TVTDataBroadcastingHybrid
 
-ダウンロード https://github.com/otya128/TVTDataBroadcastingWV2/releases
+[otya128/TVTDataBroadcastingWV2](https://github.com/otya128/TVTDataBroadcastingWV2) を基に、**ハイブリッドキャスト（放送通信連携HTML5アプリ）** と **BS4K（新4K）のデータ放送** の表示に対応させた TVTest 用データ放送プラグインのフォークです。
 
-[web-bml](https://github.com/otya128/web-bml)とWebView2を使ったTVTest用データ放送プラグイン
+従来の BML データ放送（地上デジタル／BS／CS）に加えて、以下に対応します。
 
-![動作画面](https://user-images.githubusercontent.com/4075988/162745408-282fb7ab-9826-4e82-b2ab-b1ab347a42b4.png)
+- **ハイブリッドキャスト（ARIBフェーズ0運用）**
+  - BML から `startReceivingAIT` / `getReceivedAIT` / `startAITControlledApp` でXML-AITを取得し、HTML5アプリケーションを起動
+  - TSで伝送されるAIT（`table_id` 0x74）による起動
+  - 放送映像オブジェクト（`<object>`）の映像プレーン合成、リモコンキー、EIT・イベントメッセージ、NVRAM/Greg の共有など
+- **BS4K（高度BSデジタル）データ放送（ARIB-HTML5 / MMT）**
+  - MH-AIT とデータ伝送（DDMT/DAMT）で配信される HTML5 アプリケーションの表示
+  - 受信には BS4K の MMT/TLV を扱える BonDriver が必要です（[BS4Kについて](#bs4k)参照）
+
+これらの HTML5 アプリケーションは、BML とは別の 2 枚目の WebView2 を映像の上に重ねて提示します。BML の表示処理には引き続き [web-bml](https://github.com/otya128/web-bml) を使用します。
+
+## 謝辞・基にしたプロジェクト
+
+- [otya128/TVTDataBroadcastingWV2](https://github.com/otya128/TVTDataBroadcastingWV2) — 本プラグインのベース
+- [otya128/web-bml](https://github.com/otya128/web-bml) — BML ブラウザ（本リポジトリではフォークをサブモジュールとして使用）
+- [nekohkr/dantto4k](https://github.com/nekohkr/dantto4k) — BS4K データ放送の取り出しに使用（フォークに `DB4K_*` エクスポートを追加）
 
 ## 動作環境
 
 * TVTest 0.9.0 正式版以上
-* Windows 10以上
-    * Windows 7用の対応は入れていないのでWindows 7では映像と正常に合成できないはず 8.xなら動くかも
-* WebView2ランタイム
-    * 最低限89.0.774.44以上である必要がある
-    * もしインストールされていなければインストール
-        * インストーラ: https://go.microsoft.com/fwlink/p/?LinkId=2124703
-        * 配布ページ: https://developer.microsoft.com/ja-jp/microsoft-edge/webview2/#download-section
-        * OSが32-bitでなければTVTestのアーキテクチャに関わらずx64で動作する `Plugins/TVTDataBroadcastingWV2/WebView2/msedgewebview2.exe` `Plugins/TVTDataBroadcastingWV2/WebView2/EBWebView/x64/EmbeddedBrowserWebView.dll` のように300MB以上, 200ファイル程度あるFixed Versionを直接配置しても可能
-* Visual C++ 2015-2022ランタイム
-    * 万が一入っていなければTVTestのアーキテクチャに合わせて https://aka.ms/vs/17/release/vc_redist.x64.exe (x64) https://aka.ms/vs/17/release/vc_redist.x86.exe (x86) からインストール
+* Windows 10 以上
+* WebView2 ランタイム（最低 89.0.774.44 以上）
+    * 未インストールの場合は [WebView2 配布ページ](https://developer.microsoft.com/microsoft-edge/webview2/) からインストール
+* Visual C++ 2015-2022 ランタイム
 
-映像レンダラはEVR, EVR (Custom Presenter), madVR, システムデフォルト, VMR9, VMR9 Renderless, VMR7, VMR7 Renderlessで動作します。 ただし現時点ではVMR9 Renderless, VMR7 Renderlessを使うとフルスクリーンでの表示などに支障があります。
+映像レンダラは EVR / madVR / MPC Video Renderer などで動作します。
 
-字幕やコメントを直接映像に合成するプラグインとは相性が悪いため、同時に正常に表示したい場合にはレイヤードウィンドウを使うように設定するかあきらめるなどしてください。
-映像レンダラにVMR9 Renderless, VMR7 Renderlessを選択した場合映像に直接合成してもレイヤードウィンドウを使うようにしても字幕やコメントがデータ放送中の映像に合わせて縮小されます。
+## ビルド
 
-## 操作
+### 1. 取得
 
-TVTest起動時には有効にならないようになっているため右クリックメニューからプラグインを有効にするか、設定でサイドバーにプラグイン有効アイコンを表示させてそこから有効にしてください。
-有効にしたタイミングでWebView2が起動します。
+web-bml はサブモジュールです。`--recursive` を付けてクローンしてください。
 
-プラグイン有効時に表示されるリモコンかパネルに追加されるリモコンかTVTest側の設定でキーなどをデータ放送の操作に割り当てて操作することが出来ます。
-
-字幕ボタンを押すと[aribb24.js](https://github.com/monyone/aribb24.js)を使った字幕を表示することが出来ます。
-
-テレ東(BSや系列局含)では初回は50秒ほど待たないとデータ放送が表示されません。
-
-## 設定
-
-キー割り当て、パネル、サイドバー、ステータスバーの設定はTVTestの設定で行えます。
-
-### 通信コンテンツ
-
-Plugins/TVTDataBroadcastingWV2.iniを以下のようにすると通信が有効になります。
-
-```ini
-[TVTDataBroadcastingWV2]
-EnableNetwork=1
+```sh
+git clone --recursive https://github.com/SomeDena786/TVTDataBroadcastingHybrid.git
 ```
 
-### プラグイン有効時にリモコンを表示しない
+### 2. web-bml のビルド
 
-パネルを使う場合やキー割り当てした場合リモコンウィンドウは不要
+```sh
+cd web-bml
+npm ci
+npx tsc
+cd ..
+```
 
-### TVTest起動時にプラグインを有効にする
-
-### 音量をTVTestと連動する
-
-操作音などの音量
-
-### 数字ボタンが使われていなければTVTestに渡す
-
-データ放送中で数字キーが使われていない場合数字コマンドで選局可能にする
-
-## 制約
-
-おおよそ実装されていますが一部のAPI、イベント、要素は未実装です。
-
-通信機能は既定では無効であり、その場合すべての外部へのリクエストはブロックされます。(ICoreWebView2::add_WebResourceRequestedを呼んでいる部分を参照)
-
-## ビルド方法
-
-### TVTestプラグインのビルド
-
-Visual C++ 2022が必要(2019でもおそらく可能)
-
-NuGetパッケージを復元しTVTDataBroadcastingWV2.slnをビルド
-
-### web-bmlのビルド
-
-以下のコマンドでビルド
+### 3. フロントエンド（BML/HTML5ランタイム）のビルド
 
 ```sh
 cd browser
 npm ci
 npm run build
+cd ..
 ```
 
-フォントをコピー
-```bat
-copy browser\node_modules\web-bml-fonts\*.woff2 browser\dist\
+`browser/dist/` に `TVTDataBroadcastingHybrid.js`（BML ブラウザ）と `aribhtml5_runtime.js`（HTML5アプリに注入する受信機エミュレーションランタイム）が出力されます。
+
+### 4. プラグイン（ネイティブ）のビルド
+
+`TVTDataBroadcastingHybrid.sln` を Visual Studio 2022 で開き、NuGet パッケージ（WebView2 SDK など）を復元して Release / x64 でビルドします。
+
+### 5. 配置
+
+TVTest の `Plugins` フォルダに以下を配置します。
+
+```
+Plugins/
+  TVTDataBroadcastingHybrid.tvtp
+  TVTDataBroadcastingHybrid.ini            （任意。設定）
+  TVTDataBroadcastingHybrid/
+    resources/
+      TVTDataBroadcastingHybrid.html
+      dist/
+        TVTDataBroadcastingHybrid.js
+        aribhtml5_runtime.js
+        （web-bml 用フォント .woff2）
 ```
 
-* Plugins/
-    * TVTDataBroadcastingWV2.tvtp
-    * TVTDataBroadcastingWV2
-        * resources/
-            * TVTDataBroadcastingWV2.html
-            * dist/
-                * TVTDataBroadcastingWV2.js
-                * Kosugi-Regular.woff2
-                * KosugiMaru-Bold.woff2
-                * KosugiMaru-Regular.woff2
+フォント（丸ゴシック等）が必要な場合は、BML の表示用に woff2 を `resources/dist/` に置いてください。
 
-のように配置するかTVTDataBroadcastingWV2.tvtpと同じディレクトリにTVTDataBroadcastingWV2.iniを作り以下のようにする
+## 使い方
+
+TVTest 起動時には無効になっているため、右クリックメニューやサイドバーからプラグインを有効にしてください。有効にしたタイミングで WebView2 が起動します。
+
+キー割り当て、パネル、サイドバー、ステータスバーの設定は TVTest の設定で行えます。ステータスバーの項目には、読み込み中の BML／HTML5 文書が表示されます。
+
+### 設定（`Plugins/TVTDataBroadcastingHybrid.ini`）
 
 ```ini
-[TVTDataBroadcastingWV2]
-ResourceDirectory=x:\xx\browser\
+[TVTDataBroadcastingHybrid]
+; 通信（ハイブリッドキャスト含む）を有効化
+EnableNetwork=1
+; ハイブリッドキャスト（放送通信連携HTML5）を有効化
+EnableHybridcast=1
 ```
 
+主な設定キー:
+
+| キー | 説明 |
+|---|---|
+| `EnableNetwork` | 通信コンテンツを有効化（ハイブリッドキャストに必須） |
+| `EnableHybridcast` | ハイブリッドキャスト／ARIB-HTML5 の起動を有効化 |
+| `AutoStartBroadcastAIT` | TSで伝送されるAIT(0x74)のAUTOSTARTを自動起動 |
+| `Html5UserAgent` / `Html5UserAgentBS4K` | HTML5アプリに送るUser-Agent |
+| `CardID` | getIRDID で返すB-CASカードID（16進12桁）。省略時は挿入中のカードから読み取り |
+| `Html5KeyCodes` / `Html5KeySetValues` | リモコンキーコードの上書き |
+| `BroadcastObjectTypes` | 放送映像objectとして扱うMIMEタイプ |
+| `Html5Debug` | 1でHTML5エンジンのDevToolsとログを有効化 |
+
+### ハイブリッドキャストについて
+
+ハイブリッドキャストのアプリケーションは、放送局のサーバーと通信して提示されます。アプリケーションによっては、実機の受信機と同様に **B-CAS カードのカードID** を参照し、放送局のサーバーで契約状態などを確認します。本プラグインは、挿入されている B-CAS カードのカードIDを標準のスマートカード API で読み取り、受信機として `getIRDID(5)` / `getDeviceIdentifier(5)` で返します（実機と同じ動作です）。契約の確認は放送局側の仕組みに従います。
+
+### BS4K
+
+BS4K（新4K）のデータ放送を表示するには、MMT/TLV を扱える BonDriver が必要です。本プラグインは [nekohkr/dantto4k](https://github.com/nekohkr/dantto4k) のフォーク（`DB4K_*` エクスポートを追加したもの）から、`GetModuleHandle` 経由でデータ放送のファイルと MH-AIT を取得します。該当の BonDriver を TVTest が読み込んだ状態で BS4K を選局してください。
+
+## ライセンス
+
+MIT License（[LICENSE](LICENSE)）。Copyright (c) 2022 otya ほかコントリビュータ。

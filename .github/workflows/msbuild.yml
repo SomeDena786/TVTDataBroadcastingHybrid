@@ -7,12 +7,7 @@ on:
     branches: [ master ]
 
 env:
-  # Path to the solution file relative to the root of the project.
   SOLUTION_FILE_PATH: .
-
-  # Configuration type to build.
-  # You can convert this to a build matrix if you need coverage of multiple configuration types.
-  # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
   BUILD_CONFIGURATION: Release
 
 permissions:
@@ -22,76 +17,32 @@ jobs:
   build:
     runs-on: windows-2022
 
-    strategy:
-      matrix:
-       platform: [ x86, x64, ARM64 ]
-
     steps:
-    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-    - name: Setup variable
-      env:
-        ARCH: ${{ matrix.PLATFORM }}
-        GIT_SHA: ${{ github.sha }}
-      id: name
-      run: |
-          $t=[System.DateTimeOffset]::Now.ToOffset([System.TimeSpan]::FromHours(9)).ToString("yyyy-MM-dd-HH-mm-ss")
-          $sha=$env:GIT_SHA.Substring(0, 12)
-          $dir="TVTDataBroadcastingWV2-$t-$sha-$env:ARCH"
-          Write-Output "DIR_NAME=$dir" >> $env:GITHUB_OUTPUT
-          Write-Output "VERSION=$t-$sha-$env:ARCH" >> $env:GITHUB_OUTPUT
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+      uses: microsoft/setup-msbuild@v2
 
-    - name: Restore NuGet packages
-      working-directory: ${{env.GITHUB_WORKSPACE}}
-      run: nuget restore ${{env.SOLUTION_FILE_PATH}}
-
-    - name: Build tvtp
-      env:
-        PLATFORM: ${{ matrix.PLATFORM }}
-        VERSION: ${{ steps.name.outputs.VERSION }}
-      working-directory: ${{env.GITHUB_WORKSPACE}}
-      # Add additional options to the MSBuild command line here (like platform or verbosity level).
-      # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
-      run: |
-        msbuild /m /p:Configuration=$env:BUILD_CONFIGURATION /p:Platform=$env:PLATFORM "/p:TVTDataBroadcastingWV2Version=L""$env:VERSION""" $env:SOLUTION_FILE_PATH
-
-    - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+    - uses: actions/setup-node@v4
       with:
         node-version: '24'
-        cache-dependency-path: ./browser/package-lock.json
-
-    - name: install npm packages
-      working-directory: ./browser/
-      run: npm ci
 
     - name: Build web-bml
-      working-directory: ./browser/
-      run: npm run build
-
-    - name: Prepare artifact
-      env:
-        DIR: ${{ steps.name.outputs.DIR_NAME }}
-        PLATFORM: ${{ matrix.PLATFORM }}
+      working-directory: ./web-bml/
       run: |
-          $dir="$env:DIR"
-          mkdir artifact/$dir/
-          copy LICENSE artifact/$dir/TVTDataBroadcastingWV2-LICENSE
-          copy LICENSE.nlohmann.json.txt artifact/$dir/TVTDataBroadcastingWV2-LICENSE.json.txt
-          copy README.md artifact/$dir/TVTDataBroadcastingWV2-README.txt
-          copy -ErrorAction:SilentlyContinue Release/TVTDataBroadcastingWV2.tvtp artifact/$dir/ || copy $env:PLATFORM/Release/TVTDataBroadcastingWV2.tvtp artifact/$dir/
-          mkdir artifact/$dir/TVTDataBroadcastingWV2/resources/dist/
-          copy browser/dist/TVTDataBroadcastingWV2.js artifact/$dir/TVTDataBroadcastingWV2/resources/dist/
-          copy browser/node_modules/web-bml-fonts/*.woff2 artifact/$dir/TVTDataBroadcastingWV2/resources/dist/
-          copy browser/node_modules/web-bml-fonts/LICENSE.txt artifact/$dir/TVTDataBroadcastingWV2/resources/dist/fonts-LICENSE.txt
-          copy browser/dist/TVTDataBroadcastingWV2.js.LICENSE.txt artifact/$dir/TVTDataBroadcastingWV2/resources/dist/
-          copy browser/TVTDataBroadcastingWV2.html artifact/$dir/TVTDataBroadcastingWV2/resources/
+        npm ci
+        npx tsc
 
-    - name: Generate artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: ${{ steps.name.outputs.DIR_NAME }}
-        path: |
-          artifact/
+    - name: Build frontend
+      working-directory: ./browser/
+      run: |
+        npm ci
+        npm run build
+
+    - name: Restore NuGet packages
+      run: nuget restore ${{ env.SOLUTION_FILE_PATH }}
+
+    - name: Build plugin (x64)
+      run: msbuild /m /p:Configuration=$env:BUILD_CONFIGURATION /p:Platform=x64 $env:SOLUTION_FILE_PATH

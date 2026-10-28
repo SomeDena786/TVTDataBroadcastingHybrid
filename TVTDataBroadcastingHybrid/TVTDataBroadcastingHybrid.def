@@ -1,4 +1,4 @@
-LIBRARY TVTDataBroadcastingWV2.tvtp
+LIBRARY TVTDataBroadcastingHybrid.tvtp
 
 EXPORTS
 	TVTGetVersion

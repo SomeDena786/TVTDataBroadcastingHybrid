@@ -4,7 +4,7 @@
   "license": "MIT",
   "dependencies": {
     "aribb24.js": "^1.10.9",
-    "web-bml": "^1.0.1",
+    "web-bml": "file:../web-bml",
     "web-bml-fonts": "^1.0.0"
   },
   "scripts": {

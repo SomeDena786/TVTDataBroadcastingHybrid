@@ -6,3 +6,11 @@ Release/
 packages/
 *.user
 *.aps
+node_modules/
+browser/dist/
+browser/build/
+*.tvtp
+WebView2Data/
+WebView2/
+aribhtml5_storage.json
+debug.log

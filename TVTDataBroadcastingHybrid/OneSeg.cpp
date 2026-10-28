@@ -243,7 +243,7 @@ OneSegWindow::OneSegWindow(HWND appWindow, HINSTANCE hInstance, HWND hWebView2Co
         return pThis->WndProc(hWnd, uMsg, wParam, lParam);
     };
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"TVTDataBroadcastingWV2 1Seg";
+    wc.lpszClassName = L"TVTDataBroadcastingHybrid 1Seg";
     RegisterClassExW(&wc);
     HMENU oneSegMenu = CreateMenu();
     HMENU oneSegScaleMenu = CreateMenu();

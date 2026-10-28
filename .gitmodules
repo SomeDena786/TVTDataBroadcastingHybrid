@@ -1,0 +1,3 @@
+[submodule "web-bml"]
+	path = web-bml
+	url = https://github.com/SomeDena786/web-bml.git

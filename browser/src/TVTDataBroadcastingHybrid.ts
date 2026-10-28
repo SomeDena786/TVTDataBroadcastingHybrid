@@ -2,6 +2,7 @@ import type { ComponentPMT, ResponseMessage } from "web-bml/protocol";
 import { BMLBrowser, BMLBrowserFontFace, EPG, Indicator, IP, InputApplication, InputCancelReason, InputCharacterType } from "web-bml";
 import { decodeTS } from "web-bml/ts";
 import { CaptionPlayer } from "./caption_player";
+import { AITControlledAppHost, Html5AIT, Html5Application } from "./ait_controlled_app";
 
 declare global {
     interface Window {
@@ -128,7 +129,7 @@ const apiIP: IP = {
             return { resultCode: NaN, statusCode: "", response: new Uint8Array() };
         }
         try {
-            const res = await window.fetch("https://tvtdatabroadcastingwv2-api.invalid/api/post/" + uri, {
+            const res = await window.fetch("https://tvtdatabroadcastinghybrid-api.invalid/api/post/" + uri, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/x-www-form-urlencoded"
@@ -145,7 +146,7 @@ const apiIP: IP = {
             return {};
         }
         try {
-            const res = await window.fetch("https://tvtdatabroadcastingwv2-api.invalid/api/get/" + uri, {
+            const res = await window.fetch("https://tvtdatabroadcastinghybrid-api.invalid/api/get/" + uri, {
                 method: "GET",
             });
             return { statusCode: res.status, headers: res.headers, response: new Uint8Array(await res.arrayBuffer()) };
@@ -220,6 +221,87 @@ function X_DPA_startResidentApp(appName: string, showAV: number, returnURI: stri
     return NaN;
 }
 
+// Hybridcast (放送通信連携HTML5) 設定 nativeからhtml5Configで設定される
+let html5Enabled = false;
+let html5AutoStartBroadcastAIT = true;
+let residentAppVersion: { [appName: string]: any[] } = {};
+// nativeが挿入中のB-CASカードから読み取ったカードID (16進12桁)
+let cardIdHex: string | null = null;
+
+let currentServiceIds: { originalNetworkId?: number, transportStreamId?: number, serviceId?: number } = {};
+
+function aitToMessage(app: Html5Application, ait: Html5AIT) {
+    return {
+        profile: "hybridcast",
+        ...currentServiceIds,
+        url: app.url!,
+        organizationId: app.organizationId,
+        applicationId: app.applicationId,
+        controlCode: app.controlCode,
+        applicationType: app.applicationType,
+        priority: app.priority,
+        boundaries: app.boundaries,
+        aitSource: ait.source,
+        applications: ait.applications,
+    };
+}
+
+const aitHost = new AITControlledAppHost({
+    async fetchXMLAIT(uri) {
+        if (!(networkEnabled && !isRecord && html5Enabled)) {
+            return null;
+        }
+        try {
+            const res = await window.fetch("https://tvtdatabroadcastinghybrid-api.invalid/api/get/" + uri, { method: "GET" });
+            if (!res.ok) {
+                return null;
+            }
+            return await res.text();
+        } catch {
+            return null;
+        }
+    },
+    launch(app, ait) {
+        if (!html5Enabled) {
+            return false;
+        }
+        console.log("launchHtml5", app, ait);
+        postMessage({
+            type: "launchHtml5",
+            ...aitToMessage(app, ait),
+        });
+        return true;
+    },
+    supportedApplicationTypes: new Set([0x0010]),
+    log: (...args) => console.log(...args),
+});
+
+// 放送で伝送されるAITのAUTOSTART/KILL処理 (STD-B24 第四編)
+let broadcastAutoStarted: string | null = null;
+function processBroadcastAIT() {
+    const ait = aitHost.getBroadcastAIT();
+    if (ait == null || !html5Enabled) {
+        return;
+    }
+    const running = broadcastAutoStarted;
+    if (running != null) {
+        const app = ait.applications.find(x => `${x.organizationId}.${x.applicationId}` === running);
+        if (app == null || app.controlCode === 0x04) {
+            broadcastAutoStarted = null;
+            postMessage({ type: "killHtml5", reason: "ait" });
+        }
+        return;
+    }
+    if (!html5AutoStartBroadcastAIT || !(networkEnabled && !isRecord)) {
+        return;
+    }
+    const autostart = ait.applications.filter(x => x.controlCode === 0x01 && x.url != null && x.applicationType === 0x0010).sort((a, b) => b.priority - a.priority)[0];
+    if (autostart != null) {
+        broadcastAutoStarted = `${autostart.organizationId}.${autostart.applicationId}`;
+        postMessage({ type: "launchHtml5", ...aitToMessage(autostart, ait) });
+    }
+}
+
 const bmlBrowser = new BMLBrowser({
     containerElement: contentElement,
     mediaElement: videoContainer,
@@ -262,6 +344,39 @@ const bmlBrowser = new BMLBrowser({
         return true;
     },
     X_DPA_startResidentApp,
+    extension: {
+        getBrowserSupport(sProvider, functionname, additionalinfoList) {
+            if (sProvider !== "ARIB" || !html5Enabled) {
+                return undefined;
+            }
+            const [a1, a2] = additionalinfoList;
+            // IPTVFJ STD-0013 6.1.5 / TR-B14 第三編 第2部 8.8.1(1)
+            if (functionname === "APIGroup" && a1 === "AITControlledApp.Start") {
+                return 1;
+            }
+            if (functionname === "AITControlledAppEngineFunction") {
+                return a1 === "IPTV-F" && a2 === "HTML5_ph0" ? 1 : 0;
+            }
+            if (functionname === "AITTransferMethod" || functionname === "AITTransportMethod") {
+                return a1 === "XML" && a2 === "HTTP" ? 1 : 0;
+            }
+            return undefined;
+        },
+        getResidentAppVersion(appName) {
+            if (!html5Enabled) {
+                return null;
+            }
+            return residentAppVersion[appName] ?? null;
+        },
+        getIRDID(type) {
+            // type===5: B-CASカードID (nativeが挿入中のカードから読み取って通知する)
+            if (type === 5) {
+                return cardIdHex;
+            }
+            return null;
+        },
+        aitControlledApp: aitHost,
+    },
 });
 
 function isFullScreenVideo(): boolean {
@@ -361,6 +476,17 @@ type FromWebViewMessage = {
     type: "startBrowser",
     uri: string,
     fullscreen: boolean,
+} | ({
+    type: "launchHtml5",
+} & ReturnType<typeof aitToMessage>) | {
+    type: "killHtml5",
+    reason: string,
+} | {
+    type: "html5Data",
+    data: any,
+} | {
+    type: "rpcResult",
+    result: any,
 };
 
 bmlBrowser.addEventListener("videochanged", (evt) => {
@@ -396,6 +522,8 @@ bmlBrowser.addEventListener("audiostreamchanged", (evt) => {
 });
 
 let pcr: number | undefined;
+let currentTimeCounter = 0;
+let lastEIT: any = null;
 
 // LibISDB/Filters/AnalyzerFilter.cppを参照
 const audioStreamType = new Set([
@@ -446,6 +574,19 @@ function onMessage(msg: ResponseMessage) {
         pmtRetrieved = true;
     } else if (msg.type === "currentTime") {
         isRecord = new Date().getTime() - msg.timeUnixMillis >= 5 * 60 * 1000;
+    } else if (msg.type === "eitPresentFollowing") {
+        lastEIT = msg;
+    } else if (msg.type === "programInfo") {
+        if (msg.originalNetworkId != null && msg.transportStreamId != null && msg.serviceId != null) {
+            currentServiceIds = { originalNetworkId: msg.originalNetworkId, transportStreamId: msg.transportStreamId, serviceId: msg.serviceId };
+        }
+    } else if (msg.type === "ait") {
+        aitHost.setBroadcastAIT(msg.section);
+        processBroadcastAIT();
+    }
+    // HTML5アプリケーションエンジン向けに中継する
+    if (html5Enabled && (msg.type === "eitPresentFollowing" || msg.type === "programInfo" || msg.type === "esEventUpdated" || msg.type === "ait" || msg.type === "pmt" || (msg.type === "currentTime" && ++currentTimeCounter % 10 === 0))) {
+        postMessage({ type: "html5Data", data: msg });
     }
     bmlBrowser.emitMessage(msg);
 }
@@ -501,6 +642,31 @@ type ToWebViewMessage = {
     channelId: number,
 } | {
     type: "launchOneSeg",
+} | {
+    // nativeが挿入中のB-CASカードから読み取ったカードID (16進12桁) またはnull
+    type: "irdid",
+    value: string | null,
+} | {
+    type: "html5Config",
+    enabled: boolean,
+    autoStartBroadcastAIT: boolean,
+    residentAppVersion: { [appName: string]: any[] },
+} | {
+    type: "html5Stopped",
+} | {
+    type: "bmlVisibility",
+    visible: boolean,
+} | {
+    // HTML5アプリケーションからのreplaceApplication
+    type: "html5Replace",
+    organizationId: number,
+    applicationId: number,
+    aitUrl: string | null,
+} | {
+    // HTML5エンジンからの同期呼び出し
+    type: "rpc",
+    method: string,
+    params: any,
 };
 
 // 1分間無操作であればデータ取得中の表示を消す
@@ -604,10 +770,58 @@ function onWebViewMessage(data: ToWebViewMessage, reply: (data: FromWebViewMessa
                 bmlBrowser.setMainAudioStream(es.componentId, data.channelId);
             }
         }
+    } else if (data.type === "irdid") {
+        cardIdHex = data.value;
+    } else if (data.type === "html5Config") {
+        html5Enabled = data.enabled;
+        html5AutoStartBroadcastAIT = data.autoStartBroadcastAIT;
+        residentAppVersion = data.residentAppVersion ?? {};
+    } else if (data.type === "html5Stopped") {
+        broadcastAutoStarted = null;
+    } else if (data.type === "bmlVisibility") {
+        // 子要素のvisibilityで打ち消されないようにopacityで隠す
+        browserElement.style.opacity = data.visible ? "" : "0";
+        ccContainer.style.opacity = data.visible ? "" : "0";
+    } else if (data.type === "html5Replace") {
+        const org = data.organizationId.toString(16);
+        const app = data.applicationId.toString(16);
+        let result: number;
+        if (data.aitUrl == null) {
+            result = aitHost.startAITControlledApp(org, app, undefined, null);
+        } else {
+            aitHost.startReceivingAIT(data.aitUrl, null);
+            result = aitHost.startAITControlledApp(org, app, data.aitUrl, null);
+        }
+        if (Number.isNaN(result)) {
+            // 遷移が不可能な場合はdestroyApplicationと同様に再選局と同等の動作を行う
+            postMessage({ type: "killHtml5", reason: "replace" });
+        }
+    } else if (data.type === "rpc") {
+        reply({ type: "rpcResult", result: handleRPC(data.method, data.params) });
     } else if (data.type === "launchOneSeg") {
         oneSegLaunched = true;
         browserElement.style.visibility = "visible";
     }
+}
+
+// HTML5アプリケーションエンジン (navigator.bmlCompat.browserPseudoなど) からの同期呼び出し
+function handleRPC(method: string, params: any): any {
+    switch (method) {
+        case "readPersistentArray":
+            return bmlBrowser.nvram.readPersistentArray(params.filename, params.structure);
+        case "writePersistentArray":
+            return bmlBrowser.nvram.writePersistentArray(params.filename, params.structure, params.data, undefined, true);
+        case "getGreg":
+            return Array.from({ length: 64 }, (_, i) => window.sessionStorage.getItem(`Greg[${i}]`) ?? "");
+        case "setGreg":
+            window.sessionStorage.setItem(`Greg[${params.index}]`, String(params.value));
+            return true;
+        case "getCurrentEvent":
+            return lastEIT;
+        case "getBroadcastAIT":
+            return aitHost.getBroadcastAIT();
+    }
+    return null;
 }
 
 window.chrome.webview.addEventListener("message", (ev: any) => onWebViewMessage(ev.data as ToWebViewMessage, window.chrome.webview.postMessage));

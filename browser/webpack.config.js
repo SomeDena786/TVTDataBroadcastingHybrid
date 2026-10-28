@@ -3,7 +3,8 @@ const webpack = require('webpack')
 
 module.exports = {
     entry: {
-        TVTDataBroadcastingWV2: './src/TVTDataBroadcastingWV2.ts',
+        TVTDataBroadcastingHybrid: './src/TVTDataBroadcastingHybrid.ts',
+        aribhtml5_runtime: './src/aribhtml5_runtime.ts',
     },
     output: {
         path: path.resolve(__dirname, 'dist'),

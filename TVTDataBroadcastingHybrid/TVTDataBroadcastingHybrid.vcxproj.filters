@@ -35,7 +35,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="TVTDataBroadcastingWV2.cpp">
+    <ClCompile Include="TVTDataBroadcastingHybrid.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="pch.cpp">
@@ -55,13 +55,13 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="TVTDataBroadcastingWV2.rc">
+    <ResourceCompile Include="TVTDataBroadcastingHybrid.rc">
       <Filter>リソース ファイル</Filter>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
-    <None Include="TVTDataBroadcastingWV2.def">
+    <None Include="TVTDataBroadcastingHybrid.def">
       <Filter>ソース ファイル</Filter>
     </None>
   </ItemGroup>

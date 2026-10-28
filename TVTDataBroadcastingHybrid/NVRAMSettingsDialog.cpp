@@ -248,7 +248,7 @@ INT_PTR CALLBACK NVRAMSettingsDialog::DlgProc(HWND hDlg, UINT uMsg, WPARAM wPara
         }
         else if (LOWORD(wParam) == IDC_BUTTON_DELETE_NVRAM)
         {
-            if (MessageBoxW(hDlg, L"保存領域をすべて削除しますか?", L"TVTDataBroadcastingWV2", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            if (MessageBoxW(hDlg, L"保存領域をすべて削除しますか?", L"TVTDataBroadcastingHybrid", MB_YESNO | MB_ICONQUESTION) == IDYES)
             {
                 nlohmann::json msg{
                     { "type", "nvramDelete" },

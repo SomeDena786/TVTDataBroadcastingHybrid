@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920,height=1080">
+<title>Hybridcast mock</title>
+<style>
+  body { margin: 0; width: 1920px; height: 1080px; font-family: sans-serif; color: #fff; }
+  #video { position: absolute; left: 80px; top: 120px; width: 1280px; height: 720px; }
+  #panel { position: absolute; left: 1400px; top: 120px; width: 460px; height: 840px; background: rgba(0, 40, 120, .85); padding: 16px; box-sizing: border-box; font-size: 22px; white-space: pre-wrap; overflow: hidden; }
+  #bar { position: absolute; left: 80px; top: 880px; width: 1280px; height: 80px; background: rgba(0, 0, 0, .7); font-size: 32px; line-height: 80px; padding-left: 24px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<object id="video" type="video/x-iptvf-broadcast" data="arib://-1.-1.-1/"></object>
+<div id="panel"></div>
+<div id="bar">Hybridcast mock: 色ボタンを押してください</div>
+<script>
+  const results = {};
+  window.__results = results;
+  const panel = document.getElementById("panel");
+  function log(k, v) {
+    results[k] = v;
+    panel.textContent += k + ": " + (typeof v === "string" ? v : JSON.stringify(v)) + "\n";
+  }
+  try {
+    const app = navigator.applicationManager.getOwnerApplication();
+    log("app", { type: app.type, org: app.organization_id, id: app.application_id, cc: app.control_code });
+    const ks = app.keySet;
+    log("keySet.setValue", ks.setValue(ks.RED | ks.GREEN | ks.YELLOW | ks.BLUE | ks.NAVIGATION | ks.NUMERIC));
+    log("ait apps", app.getOwnerAIT().getApplications().length);
+  } catch (e) { log("app error", String(e)); }
+  try {
+    navigator.receiverDevice.getCurrentEventInformation(info => {
+      log("event", { onid: info.original_network_id, tsid: info.transport_stream_id, sid: info.service_id, eid: info.event_id, name: info.name, f_name: info.f_name, start: String(info.start_time) });
+    });
+  } catch (e) { log("event error", String(e)); }
+  try {
+    navigator.receiverDevice.streamEvent.addEventIDUpdateListener(ref => log("eventIdUpdate", ref));
+  } catch (e) { log("eventId error", String(e)); }
+  try {
+    navigator.receiverDevice.streamEvent.addGeneralEventMessageListener({ es_ref: { component_tag: 0x40 }, message_group_id: 1 }, msg => log("gem", msg));
+  } catch (e) { log("gem error", String(e)); }
+  try {
+    log("sysinfo", navigator.receiverDevice.getSystemInformation(null));
+  } catch (e) { log("sysinfo error", String(e)); }
+  try {
+    const bp = navigator.bmlCompat.browserPseudo;
+    log("greg0", bp.Greg[0]);
+    log("zipcode", bp.readPersistentArray("nvram://receiverinfo/zipcode", "S:7B"));
+  } catch (e) { log("bmlCompat error", String(e)); }
+  try {
+    const v = document.getElementById("video");
+    log("video.getVideoSrc", v.getVideoSrc());
+    log("video.isFullscreen", v.isFullscreen());
+  } catch (e) { log("video error", String(e)); }
+  log("VK_RED", typeof VK_RED === "undefined" ? null : VK_RED);
+  document.addEventListener("keydown", (e) => {
+    log("keydown", e.keyCode);
+    document.getElementById("bar").textContent = "keydown " + e.keyCode;
+    if (e.keyCode === VK_BLUE) {
+      const v = document.getElementById("video");
+      if (v.isFullscreen()) v.disableFullscreen(); else v.enableFullscreen();
+    }
+    e.preventDefault();
+  });
+</script>
+</body>
+</html>
