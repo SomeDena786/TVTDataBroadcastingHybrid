@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <winscard.h>
 #include <thread>
+#include "AppDataTsReceiver.h"
 #pragma comment(lib, "winscard.lib")
 
 using namespace Microsoft::WRL;
@@ -302,6 +303,8 @@ class CDataBroadcastingWV2 : public TVTest::CTVTestPlugin, TVTest::CTVTestEventH
     std::atomic<bool> webViewLoaded;
     PacketQueue packetQueue;
     std::vector<WCHAR> packetsToJsonBuf;
+    // TS側に伝送された4Kデータ放送 (nanamitm/dantto4k の 'D4KA' PID) の受信
+    AppDataTs::Receiver tsAppData;
 
     HWND hRemoteWnd = nullptr;
     HWND hPanelWnd = nullptr;
@@ -533,6 +536,8 @@ bool CDataBroadcastingWV2::GetPluginInfo(TVTest::PluginInfo* pInfo)
 BOOL CALLBACK CDataBroadcastingWV2::StreamCallback(BYTE* pData, void* pClientData)
 {
     auto pThis = (CDataBroadcastingWV2*)pClientData;
+    // TS側伝送の4Kデータ放送 (D4KA PID) を解析 (全TSパケットを渡す)
+    pThis->tsAppData.processPacket(pData);
     if (pThis->packetQueue.enqueuePacket(pData))
     {
         PostMessageW(pThis->hMessageWnd, WM_APP_PACKET, 0, 0);
@@ -612,6 +617,7 @@ bool CDataBroadcastingWV2::OnServiceUpdate()
     {
         this->currentServiceIsOneSeg = false;
         this->packetQueue.clear();
+        this->tsAppData.clear();
         if (this->html5Active)
         {
             // service_bound_flag: サービスの切り替えでアプリケーションは終了する

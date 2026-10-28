@@ -248,6 +248,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AppDataTsReceiver.h" />
     <ClInclude Include="InputDialog.h" />
     <ClInclude Include="NVRAMSettingsDialog.h" />
     <ClInclude Include="OneSeg.h" />

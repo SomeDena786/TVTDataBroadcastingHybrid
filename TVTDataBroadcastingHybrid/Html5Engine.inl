@@ -1186,7 +1186,9 @@ static std::wstring GuessContentType(const std::string& path)
 
 bool CDataBroadcastingWV2::GetDB4KFile(LPCWSTR path, std::vector<BYTE>& data, std::wstring& contentType)
 {
-    if (!LoadDB4K())
+    // TS側伝送 (nanamitm dantto の D4KA PID) があればそちらを優先、無ければ DB4K DLL
+    bool useTs = this->tsAppData.hasPid();
+    if (!useTs && !LoadDB4K())
     {
         return false;
     }
@@ -1230,6 +1232,22 @@ bool CDataBroadcastingWV2::GetDB4KFile(LPCWSTR path, std::vector<BYTE>& data, st
     }
     for (auto&& c : candidates)
     {
+        if (useTs)
+        {
+            std::vector<uint8_t> tsData;
+            std::string tsType;
+            if (this->tsAppData.getFileByPath(c, tsData, tsType))
+            {
+                data.assign(tsData.begin(), tsData.end());
+                contentType = tsType.empty() ? GuessContentType(c) : utf8StrToWString(tsType.c_str());
+                if (contentType.starts_with(L"text/") && contentType.find(L"charset") == std::wstring::npos)
+                {
+                    contentType += L"; charset=utf-8";
+                }
+                return true;
+            }
+            continue; // TS優先時はDLLにフォールバックしない
+        }
         uint32_t size = 0;
         if (!g_db4k.getFileByPath(c.c_str(), nullptr, &size))
         {
@@ -1259,18 +1277,42 @@ bool CDataBroadcastingWV2::GetDB4KFile(LPCWSTR path, std::vector<BYTE>& data, st
 void CDataBroadcastingWV2::CheckDB4K()
 {
     this->ProcessDB4KPending();
-    if (!this->html5Enabled || !this->webViewEnvironment || !LoadDB4K())
+    if (!this->html5Enabled || !this->webViewEnvironment)
     {
         return;
     }
-    if (g_db4k.setCallback && g_db4kNotifyWnd != this->hMessageWnd)
+    // TS側伝送 (nanamitm dantto の D4KA PID) があればそちらを優先、無ければ DB4K DLL
+    bool useTs = this->tsAppData.hasPid();
+    if (!useTs && !LoadDB4K())
+    {
+        return;
+    }
+    if (!useTs && g_db4k.setCallback && g_db4kNotifyWnd != this->hMessageWnd)
     {
         g_db4kNotifyWnd = this->hMessageWnd;
         g_db4k.setCallback(DB4KCallback, this);
     }
     int events = g_db4kPendingEvents.exchange(0);
     DB4KAppInfo info = {};
-    bool valid = g_db4k.getApplicationInfo(&info) && info.valid;
+    bool valid;
+    if (useTs)
+    {
+        AppDataTs::Receiver::AppInfo a;
+        valid = this->tsAppData.getApplicationInfo(a);
+        if (valid)
+        {
+            info.applicationType = a.applicationType;
+            info.organizationId = a.organizationId;
+            info.applicationId = a.applicationId;
+            info.controlCode = a.controlCode;
+            strncpy_s(info.entryPointUrl, a.entryUrl.c_str(), _TRUNCATE);
+            info.valid = 1;
+        }
+    }
+    else
+    {
+        valid = g_db4k.getApplicationInfo(&info) && info.valid;
+    }
     std::string key = valid ? std::to_string(info.organizationId) + "." + std::to_string(info.applicationId) + ":" + info.entryPointUrl : "";
     if (this->html5Active && this->html5Launch.value("profile", std::string()) == "bs4k")
     {
@@ -1312,13 +1354,21 @@ void CDataBroadcastingWV2::CheckDB4K()
         std::wstring contentType;
         if (!this->GetDB4KFile(utf8StrToWString(("/" + entry).c_str()).c_str(), data, contentType))
         {
-            if (this->db4kWaitingEntry != entry && g_db4k.listFiles)
+            if (this->db4kWaitingEntry != entry)
             {
                 this->db4kWaitingEntry = entry;
-                uint32_t size = 0;
-                g_db4k.listFiles(nullptr, &size);
-                std::string list(size, '\0');
-                g_db4k.listFiles(list.data(), &size);
+                std::string list;
+                if (useTs)
+                {
+                    for (auto& f : this->tsAppData.listFiles()) list += f + "\n";
+                }
+                else if (g_db4k.listFiles)
+                {
+                    uint32_t size = 0;
+                    g_db4k.listFiles(nullptr, &size);
+                    list.resize(size);
+                    g_db4k.listFiles(list.data(), &size);
+                }
                 this->m_pApp->AddLog((L"BS4K: エントリ " + utf8StrToWString(entry.c_str()) + L" を待っています。受信済みファイル: " + utf8StrToWString(list.c_str())).c_str(), TVTest::LOG_TYPE_INFORMATION);
             }
             return;
