@@ -107,7 +107,6 @@ EnableHybridcast=1
 | `EnableHybridcast` | ハイブリッドキャスト／ARIB-HTML5 の起動を有効化 |
 | `AutoStartBroadcastAIT` | TSで伝送されるAIT(0x74)のAUTOSTARTを自動起動 |
 | `Html5UserAgent` / `Html5UserAgentBS4K` | HTML5アプリに送るUser-Agent |
-| `CardID` | getIRDID で返すB-CASカードID（16進12桁）。省略時は挿入中のカードから読み取り |
 | `Html5KeyCodes` / `Html5KeySetValues` | リモコンキーコードの上書き |
 | `BroadcastObjectTypes` | 放送映像objectとして扱うMIMEタイプ |
 | `Html5Debug` | 1でHTML5エンジンのDevToolsとログを有効化 |

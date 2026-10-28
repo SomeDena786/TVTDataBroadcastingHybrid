@@ -1213,13 +1213,17 @@ void CDataBroadcastingWV2::InitWebView2()
         return;
     }
     auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
-    options->put_AdditionalBrowserArguments(
+    std::wstring browserArgs =
         L"--autoplay-policy=no-user-gesture-required "
         L"--disable-features=msSmartScreenProtection "
         // IWebView2Controller3::put_RasterizationScaleに1.0を指定すればいいはずだけどリサイズがうまくいかなかったり挙動が謎なのでコマンドラインを使う
         // 副作用として開発者ツールやタスクマネージャーのウィンドウ枠含めたスケーリングが100%固定になる
-        L"--force-device-scale-factor=1"
-    );
+        L"--force-device-scale-factor=1";
+    if (this->GetIniItem(L"Html5Debug", 0))
+    {
+        browserArgs += L" --remote-debugging-port=9222";
+    }
+    options->put_AdditionalBrowserArguments(browserArgs.c_str());
     auto result = CreateCoreWebView2EnvironmentWithOptions(webView2Directory, this->webView2DataDirectory.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this, resourceDirectory](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
@@ -1908,7 +1912,13 @@ std::string CDataBroadcastingWV2::ReadBCASCardID()
             BYTE command[] = { 0x90, 0x30, 0x00, 0x00, 0x00 };
             BYTE recv[258] = {};
             DWORD recvLen = sizeof(recv);
-            auto pci = (protocol == SCARD_PROTOCOL_T0) ? SCARD_PCI_T0 : SCARD_PCI_T1;
+            // SCARD_PCI_T0 / SCARD_PCI_T1 マクロは winscard.dll の g_rgSCardT0Pci /
+            // g_rgSCardT1Pci をデータとしてインポートする。環境によっては winscard.dll が
+            // これらの変数をエクスポートしておらず、暗黙リンクに失敗してプラグイン自体が
+            // ロードできなくなる。そのため PCI 構造体をローカルで構築してデータインポートを避ける。
+            static const SCARD_IO_REQUEST ioRequestT0 = { SCARD_PROTOCOL_T0, sizeof(SCARD_IO_REQUEST) };
+            static const SCARD_IO_REQUEST ioRequestT1 = { SCARD_PROTOCOL_T1, sizeof(SCARD_IO_REQUEST) };
+            LPCSCARD_IO_REQUEST pci = (protocol == SCARD_PROTOCOL_T0) ? &ioRequestT0 : &ioRequestT1;
             if (SCardTransmit(card, pci, command, sizeof(command), nullptr, recv, &recvLen) == SCARD_S_SUCCESS
                 && recvLen >= 14 && recv[6] == 0x00 && recv[7] == 0x05)
             {
