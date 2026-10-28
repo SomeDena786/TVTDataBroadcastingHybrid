@@ -18,7 +18,7 @@
 
 - [otya128/TVTDataBroadcastingWV2](https://github.com/otya128/TVTDataBroadcastingWV2) — 本プラグインのベース
 - [otya128/web-bml](https://github.com/otya128/web-bml) — BML ブラウザ（本リポジトリではフォークをサブモジュールとして使用）
-- [nekohkr/dantto4k](https://github.com/nekohkr/dantto4k) — BS4K データ放送の取り出しに使用（フォークに `DB4K_*` エクスポートを追加）
+- [nekohkr/dantto4k](https://github.com/nekohkr/dantto4k) — BS4K データ放送の取り出しに使用。`DB4K_*` エクスポートを追加したフォーク（[SomeDena786/dantto4k `bs4k-databroadcast` ブランチ](https://github.com/SomeDena786/dantto4k/tree/bs4k-databroadcast)）を使います
 
 ## 動作環境
 
@@ -118,7 +118,7 @@ EnableHybridcast=1
 
 ### BS4K
 
-BS4K（新4K）のデータ放送を表示するには、MMT/TLV を扱える BonDriver が必要です。本プラグインは [nekohkr/dantto4k](https://github.com/nekohkr/dantto4k) のフォーク（`DB4K_*` エクスポートを追加したもの）から、`GetModuleHandle` 経由でデータ放送のファイルと MH-AIT を取得します。該当の BonDriver を TVTest が読み込んだ状態で BS4K を選局してください。
+BS4K（新4K）のデータ放送を表示するには、MMT/TLV を扱える BonDriver が必要です。本プラグインは dantto4k のフォーク（[SomeDena786/dantto4k `bs4k-databroadcast` ブランチ](https://github.com/SomeDena786/dantto4k/tree/bs4k-databroadcast)。`DB4K_*` エクスポートを追加したもの）から、`GetModuleHandle` 経由でデータ放送のファイルと MH-AIT を取得します。このフォークをビルドした `BonDriver_dantto4k.dll` を TVTest が読み込んだ状態で BS4K を選局してください。
 
 ## ライセンス
 
